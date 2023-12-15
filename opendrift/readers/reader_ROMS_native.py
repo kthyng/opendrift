@@ -29,7 +29,9 @@ from opendrift.readers.roppy import depth
 
 class Reader(BaseReader, StructuredReader):
 
-    def __init__(self, filename=None, name=None, gridfile=None, standard_name_mapping={}):
+    def __init__(self, filename=None, name=None, gridfile=None, 
+                 standard_name_mapping={},
+                 kwargs_grid_merge=None, kwargs_xarray=None):
 
         if filename is None:
             raise ValueError('Need filename as argument to constructor')
@@ -38,14 +40,15 @@ class Reader(BaseReader, StructuredReader):
         self.ROMS_variable_mapping = {
             # Removing (temoprarily) land_binary_mask from ROMS-variables,
             # as this leads to trouble with linearNDFast interpolation
-            'mask_rho': 'land_binary_mask',
-            'mask_psi': 'land_binary_mask',
+            # 'mask_rho': 'land_binary_mask',
+            # 'mask_psi': 'land_binary_mask',
+            'wetdry_mask_rho': 'land_binary_mask',
             'h': 'sea_floor_depth_below_sea_level',
             'zeta': 'sea_surface_height',
             'u': 'x_sea_water_velocity',
             'v': 'y_sea_water_velocity',
-            #'u_eastward': 'x_sea_water_velocity',  # these are wrognly rotated below
-            #'v_northward': 'y_sea_water_velocity',
+            'u_eastward': 'x_sea_water_velocity',  # for NWGOA but not CIOFS
+            'v_northward': 'y_sea_water_velocity',
             'w': 'upward_sea_water_velocity',
             'temp': 'sea_water_temperature',
             'salt': 'sea_water_salinity',
@@ -53,19 +56,26 @@ class Reader(BaseReader, StructuredReader):
             'vice': 'sea_ice_y_velocity',
             'aice': 'sea_ice_area_fraction',
             'hice': 'sea_ice_thickness',
-            'gls': 'turbulent_generic_length_scale',
-            'tke': 'turbulent_kinetic_energy',
-            'AKs': 'ocean_vertical_diffusivity',
-            'sustr': 'surface_downward_x_stress',
-            'svstr': 'surface_downward_y_stress',
-            'tair': 'air_temperature',
+            # 'gls': 'turbulent_generic_length_scale',
+            # 'tke': 'turbulent_kinetic_energy',
+            # 'AKs': 'ocean_vertical_diffusivity',
+            # 'sustr': 'surface_downward_x_stress',
+            # 'svstr': 'surface_downward_y_stress',
+            # 'tair': 'air_temperature',
             'wspd': 'wind_speed',
             'uwnd': 'x_wind',
             'vwnd': 'y_wind',
             'uwind': 'x_wind',
             'vwind': 'y_wind',
+            # CIOFS but these are east/north too
+            # will be rotated
             'Uwind': 'x_wind',
-            'Vwind': 'y_wind'}
+            'Vwind': 'y_wind',
+            # NWGOA, there are east/north oriented and will not be rotated
+            # because "east" "north" in variable names
+            'Uwind_eastward': 'x_wind',
+            'Vwind_northward': 'y_wind',
+            }
 
         # Add user provided variable mappings
         self.ROMS_variable_mapping.update(standard_name_mapping)
@@ -85,6 +95,7 @@ class Reader(BaseReader, StructuredReader):
         else:
             self.name = name
 
+        kwargs_xarray = kwargs_xarray or {}
         try:
             # Open file, check that everything is ok
             logger.info('Opening dataset: ' + filestr)
@@ -105,13 +116,14 @@ class Reader(BaseReader, StructuredReader):
                     data_vars='minimal', coords='minimal')
             else:
                 logger.info('Opening file with Dataset')
-                self.Dataset = xr.open_dataset(filename, decode_times=False)
+                self.Dataset = xr.open_dataset(filename, decode_times=False, **kwargs_xarray)
         except Exception as e:
             raise ValueError(e)
 
+        kwargs_grid_merge = kwargs_grid_merge or {}
         if gridfile is not None:  # Merging gridfile dataset with main dataset
             gf = xr.open_dataset(gridfile)
-            self.Dataset = xr.merge([self.Dataset, gf])
+            self.Dataset = xr.merge([self.Dataset, gf], **kwargs_grid_merge)
 
         if 'Vtransform' in self.Dataset.variables:
             self.Vtransform = self.Dataset.variables['Vtransform'].data  # scalar
@@ -168,6 +180,10 @@ class Reader(BaseReader, StructuredReader):
         else:
             raise ValueError(filename + ' does not contain lon/lat '
                              'arrays, please supply a grid-file: "gridfile=<grid_file>"')
+        
+        # For NWGOA, need to calculate wetdry mask from a variable
+        if "wetdry_mask_rho" not in self.Dataset:
+            self.Dataset["wetdry_mask_rho"] = (~self.Dataset.zeta.isnull()).astype(int)
 
         for var in list(self.ROMS_variable_mapping):  # Remove unused variables
             if var not in self.Dataset.variables:
@@ -223,6 +239,7 @@ class Reader(BaseReader, StructuredReader):
         # A bit hackish solution:
         # If variable names or their standard_name contain "east" or "north", 
         # these should not be rotated from xi-direction to east-direction
+        # Most or no models will actually use "east/north" variables though
         self.do_not_rotate = []
         for var, stdname in self.ROMS_variable_mapping.items():
             if 'east' in var.lower() or 'east' in stdname.lower() or \
@@ -240,9 +257,10 @@ class Reader(BaseReader, StructuredReader):
         requested_variables, time, x, y, z, outside = self.check_arguments(
             requested_variables, time, x, y, z)
 
-        if 'land_binary_mask' in requested_variables and not hasattr(self, 'land_binary_mask'):
-            # Read landmask for whole domain, for later re-use
-            self.land_binary_mask = 1 - self.Dataset.variables['mask_rho'][:]
+        # if 'land_binary_mask' in requested_variables and not hasattr(self, 'land_binary_mask'):
+        #     self.land_binary_mask = 1 - self.Dataset.variables['wetdry_mask_rho']
+        #     # Read landmask for whole domain, for later re-use
+        #     # self.land_binary_mask = 1 - self.Dataset.variables['mask_rho'][:]
 
         if 'sea_floor_depth_below_sea_level' in requested_variables and not hasattr(
                     self, 'sea_floor_depth_below_sea_level'):
@@ -337,7 +355,11 @@ class Reader(BaseReader, StructuredReader):
             var = self.Dataset.variables[varname[0]]
 
             if par == 'land_binary_mask':
-               variables[par] = self.land_binary_mask[indy, indx]
+                if var.ndim == 2:
+                    variables[par] = self.Dataset['wetdry_mask_rho'][indy, indx]
+                elif var.ndim == 3:
+                    variables[par] = self.Dataset['wetdry_mask_rho'][indxTime, indy, indx]
+                variables[par] = 1 - variables[par]
             elif par == 'sea_floor_depth_below_sea_level':
                 variables[par] = self.sea_floor_depth_below_sea_level[indy, indx]
             elif var.ndim == 2:
@@ -520,7 +542,10 @@ class Reader(BaseReader, StructuredReader):
 
         if 'x_sea_water_velocity' in variables.keys() or \
             'sea_ice_x_velocity' in variables.keys() or \
-            'x_wind' in variables.keys():
+            'x_wind' in variables.keys() and \
+            'x_sea_water_velocity' not in self.do_not_rotate and \
+            'sea_ice_x_velocity' not in self.do_not_rotate and \
+            'x_wind' not in self.do_not_rotate:
             # We must rotate current vectors
             if not hasattr(self, 'angle_xi_east'):
                 if 'angle' in self.Dataset.variables:
@@ -537,18 +562,21 @@ class Reader(BaseReader, StructuredReader):
                     variables['y_sea_water_velocity'] = rotate_vectors_angle(
                         variables['x_sea_water_velocity'],
                         variables['y_sea_water_velocity'], rad)
+                logger.debug('Rotated x_sea_water_velocity and y_sea_water_velocity')
             if 'sea_ice_x_velocity' in variables.keys() and \
                     'sea_ice_x_velocity' not in self.do_not_rotate:
                 variables['sea_ice_x_velocity'], \
                     variables['sea_ice_y_velocity'] = rotate_vectors_angle(
                         variables['sea_ice_x_velocity'],
                         variables['sea_ice_y_velocity'], rad)
+                logger.debug('Rotated sea_ice_x_velocity and sea_ice_y_velocity')
             if 'x_wind' in variables.keys() and \
                     'x_wind' not in self.do_not_rotate:
                 variables['x_wind'], \
                     variables['y_wind'] = rotate_vectors_angle(
                         variables['x_wind'],
                         variables['y_wind'], rad)
+                logger.debug('Rotated x_wind and y_wind')
 
         # Masking NaN
         for var in requested_variables:
