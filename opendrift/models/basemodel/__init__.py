@@ -27,7 +27,7 @@ try:
     from dotenv import load_dotenv
     load_dotenv()
 except:
-    logger.warning('Cound not load dotenv')
+    logger.debug('Cound not load dotenv')
 
 import sys
 import os
@@ -956,7 +956,7 @@ class OpenDriftSimulation(PhysicsMethods, Timeable, Configurable):
 
         if isinstance(land_reader, ShapeReader):
             # can do this better
-            land_indices = land_reader.__on_land__(lon, lat)
+            land_indices = land_reader.get_variables('land_binary_mask', x=lon, y=lat)['land_binary_mask']
             land_indices = np.where(land_indices==1)[0]
             lon[land_indices], lat[land_indices], _ = land_reader.get_nearest_outside(
                 lon[land_indices],
@@ -2420,7 +2420,7 @@ class OpenDriftSimulation(PhysicsMethods, Timeable, Configurable):
 
     def set_up_map(self,
                    corners=None,
-                   buffer=.1,
+                   buffer='auto',
                    delta_lat=None,
                    lscale=None,
                    fast=False,
@@ -2461,6 +2461,9 @@ class OpenDriftSimulation(PhysicsMethods, Timeable, Configurable):
                 lonmax = np.nanmax(lons)
                 latmin = np.nanmin(lats)
                 latmax = np.nanmax(lats)
+            if buffer == 'auto':
+                buffer_fraction = 0.3  # 30% whitespace, to be updated
+                buffer = np.maximum((lonmax-lonmin)/2, latmax-latmin)*buffer_fraction
             lonmin = lonmin - buffer * 2
             lonmax = lonmax + buffer * 2
             latmin = latmin - buffer
@@ -2523,6 +2526,7 @@ class OpenDriftSimulation(PhysicsMethods, Timeable, Configurable):
                 land_color = 'gray'
             else:
                 land_color = cfeature.COLORS['land']
+        land_zorder = kwargs.pop('land_zorder', 10)
 
         if 'text' in kwargs:
             if not isinstance(kwargs['text'], list):
@@ -2559,6 +2563,11 @@ class OpenDriftSimulation(PhysicsMethods, Timeable, Configurable):
                     **bx)
                 ax.add_patch(patch)
 
+        if 'line_plot_options' in kwargs:
+            x = kwargs['line_plot_options'].pop('x')
+            y = kwargs['line_plot_options'].pop('y')
+            plt.plot(x, y, **kwargs['line_plot_options'], transform=self.crs_lonlat)
+
         if not hide_landmask:
             if 'land_binary_mask' in self.env.priority_list and self.env.priority_list[
                     'land_binary_mask'][0] == 'shape':
@@ -2574,9 +2583,10 @@ class OpenDriftSimulation(PhysicsMethods, Timeable, Configurable):
                                   facecolor=facecolor,
                                   edgecolor='black')
             else:
-                reader_global_landmask.plot_land(ax, lonmin, latmin, lonmax,
-                                                 latmax, fast, ocean_color,
-                                                 land_color, lscale,
+                reader_global_landmask.plot_land(ax, lonmin, latmin, lonmax, latmax,
+                                                 fast=fast, ocean_color=ocean_color,
+                                                 land_color=land_color, land_zorder=land_zorder,
+                                                 lscale=lscale,
                                                  crs_plot=self.crs_plot,
                                                  crs_lonlat=self.crs_lonlat)
 
@@ -2612,7 +2622,7 @@ class OpenDriftSimulation(PhysicsMethods, Timeable, Configurable):
 
 
     def animation(self,
-                  buffer=.2,
+                  buffer='auto',
                   corners=None,
                   filename=None,
                   compare=None,
@@ -3342,7 +3352,7 @@ class OpenDriftSimulation(PhysicsMethods, Timeable, Configurable):
 
     def plot(self,
              background=None,
-             buffer=.2,
+             buffer='auto',
              corners=None,
              linecolor=None,
              filename=None,
