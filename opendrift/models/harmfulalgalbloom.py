@@ -179,6 +179,44 @@ class HarmfulAlgalBloom(OceanDrift):
                                 'min': 0., 'max': 1., 'units': 'fraction',
                                 'description': 'Threshold of biomass below which a particle is considered dead and deactivated.',
                                 'level': CONFIG_LEVEL_ADVANCED},
+
+            'hab:vertical_behavior': {'type': 'enum',
+                                'enum': ['none', 'band', 'diel_band'],
+                                'default': 'none',
+                                'description': 'Vertical behavior: no active movement, fixed band, or diel band migration.',
+                                'level': CONFIG_LEVEL_BASIC},
+            'hab:swim_speed': {'type': 'float',
+                                'default': 0.001,  # 1 mm/s
+                                'units': 'm/s',
+                                'min': 0.0,
+                                'max': 100,
+                                'description': 'Maximum active vertical swimming speed (m/s).',
+                                'level': CONFIG_LEVEL_BASIC},
+            'hab:band_center_depth': {'type': 'float',
+                                'default': -10.0,
+                                'units': 'm',
+                                'min': -10000, 'max': 0.0,
+                                'description': 'Target center of preferred depth band (m, negative down).',
+                                'level': CONFIG_LEVEL_BASIC},
+            'hab:band_half_width': {'type': 'float',
+                                'default': 5.0,
+                                'units': 'm',
+                                'min': 0.0, 'max': 5000,
+                                'description': 'Half-width of preferred depth band (m).',
+                                'level': CONFIG_LEVEL_BASIC},
+            'hab:diel_day_depth': {'type': 'float',
+                                'default': -20.0,
+                                'units': 'm',
+                                'min': -10000, 'max': 0.0,
+                                'description': 'Target depth during daytime (m, negative).',
+                                'level': CONFIG_LEVEL_BASIC},
+            'hab:diel_night_depth': {'type': 'float',
+                                'default': -5.0,
+                                'units': 'm',
+                                'min': -10000, 'max': 0.0,
+                                'description': 'Target depth during nighttime (m, negative).',
+                                'level': CONFIG_LEVEL_BASIC},
+
         }
             )
 
@@ -186,6 +224,148 @@ class HarmfulAlgalBloom(OceanDrift):
         # self._set_config_default('drift:vertical_mixing', True)
         # self._set_config_default('drift:vertical_mixing_at_surface', True)
         # self._set_config_default('drift:vertical_advection_at_surface', True)
+
+    # ---------------------------------------------------------------------
+    # Time helpers: UTC -> local solar hour
+    # ---------------------------------------------------------------------
+
+    def _current_utc_hour(self):
+        """Current model time in UTC hours [0, 24)."""
+        t = self.time  # datetime in UTC
+        return t.hour + t.minute / 60.0 + t.second / 3600.0
+
+
+    def _local_solar_hour(self, lon_deg):
+        """
+        Convert UTC model time to local solar time for given longitude(s).
+        lon_deg: degrees East (scalar or array).
+        Returns hours in [0, 24).
+        """
+        utc_hour = self._current_utc_hour()
+        # 15° longitude = 1 hour; positive lon east of Greenwich.
+        local = utc_hour + lon_deg / 15.0
+        # Wrap into [0, 24)
+        return np.mod(local, 24.0)
+
+    # ---------------------------------------------------------------------
+    # Fast sunrise/sunset approximation based on simulation date
+    # ---------------------------------------------------------------------
+
+    def _approx_sunrise_sunset(self, lat_deg):
+        """
+        Fast approximation of sunrise/sunset for the current simulation date.
+
+        lat_deg: latitude in degrees (scalar or array).
+        Uses day-of-year from self.time (UTC), which corresponds to the
+        simulation date.
+        Returns (sunrise, sunset) in local solar hours [0, 24).
+        """
+        # Ensure arrays for vectorized operations
+        lat = np.asarray(lat_deg, dtype=float)
+
+        # Day of year from the simulation clock (UTC)
+        N = self.time.timetuple().tm_yday
+
+        # Declination (degrees)
+        decl_deg = 23.44 * np.cos(2.0 * np.pi * (N + 10.0) / 365.0)
+        decl_rad = np.radians(decl_deg)
+        lat_rad  = np.radians(lat)
+
+        # Hour angle at sunrise/sunset
+        cosH = -np.tan(lat_rad) * np.tan(decl_rad)
+        cosH = np.clip(cosH, -1.0, 1.0)   # handle polar extremes
+        H = np.arccos(cosH)               # radians
+
+        # Convert to hours: 15° per hour, H in radians
+        H_deg = np.degrees(H)
+        daylight_hours = 2.0 * H_deg / 15.0
+
+        sunrise = 12.0 - daylight_hours / 2.0
+        sunset  = 12.0 + daylight_hours / 2.0
+
+        return sunrise, sunset   # same shape as lat
+
+    # ---------------------------------------------------------------------
+    # Diel behavior using date + UTC + longitude
+    # ---------------------------------------------------------------------
+
+    def _target_depth_diel(self, z):
+        """
+        Target depth for diel_band behavior.
+
+        - Uses self.time (UTC) for the simulation date.
+        - Converts UTC to local solar time via longitude.
+        - Computes sunrise/sunset from latitude and date.
+        """
+        lat = np.asarray(self.elements.lat, dtype=float)
+        lon = np.asarray(self.elements.lon, dtype=float)
+
+        # Local solar hour for each particle
+        local_hour = self._local_solar_hour(lon)  # same shape as lon
+
+        # Sunrise/sunset (local solar time) for each particle based on lat + date
+        sunrise, sunset = self._approx_sunrise_sunset(lat)
+
+        # Daytime mask
+        is_day = (local_hour >= sunrise) & (local_hour < sunset)
+
+        day_z = self.get_config('hab:diel_day_depth')
+        night_z = self.get_config('hab:diel_night_depth')
+
+        # Choose depth per particle
+        target = np.where(is_day, day_z, night_z).astype(z.dtype)
+
+        return target
+
+    # ---------------------------------------------------------------------
+    # Band behavior and dispatcher as before
+    # ---------------------------------------------------------------------
+
+    def _target_depth_band(self, z):
+        z0 = self.get_config('hab:band_center_depth')
+        half_w = self.get_config('hab:band_half_width')
+
+        band_min = z0 - half_w
+        band_max = z0 + half_w
+
+        target = np.where(
+            (z >= band_min) & (z <= band_max),
+            z0,
+            np.where(z < band_min, band_min, band_max),
+        )
+        return target
+
+
+    def _apply_vertical_behavior(self):
+        behavior = self.get_config('hab:vertical_behavior')
+        if behavior == 'none':
+            return
+
+        z = self.elements.z.copy()
+        dt = self.time_step.total_seconds()
+        swim_speed = self.get_config('hab:swim_speed')
+
+        if swim_speed <= 0.0 or dt <= 0.0:
+            return
+
+        if behavior == 'band':
+            target_z = self._target_depth_band(z)
+        elif behavior == 'diel_band':
+            target_z = self._target_depth_diel(z)
+        else:
+            return
+
+        dz = target_z - z
+        max_step = swim_speed * dt
+        dz_step = np.clip(dz, -max_step, max_step)
+
+        self.elements.z += dz_step
+
+        # # Clamp to seafloor and surface if desired
+        # if hasattr(self.elements, 'sea_floor_depth_below_sea_level'):
+        #     bottom = -self.elements.sea_floor_depth_below_sea_level
+        #     self.elements.z = np.maximum(self.elements.z, bottom)
+        # self.elements.z = np.minimum(self.elements.z, 0.0)
 
     def classify_zone(self, value, death_min_key, death_max_key, pref_min_key, pref_max_key):
         """Classify environmental suitability zone for a scalar field (T or S).
@@ -322,3 +502,5 @@ class HarmfulAlgalBloom(OceanDrift):
         # self.update_terminal_velocity()
         self.vertical_mixing()
         # self.larvae_vertical_migration()
+
+        self._apply_vertical_behavior()
