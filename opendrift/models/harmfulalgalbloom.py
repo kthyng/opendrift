@@ -260,16 +260,16 @@ class HarmfulAlgalBloom(OceanDrift):
         simulation date.
         Returns (sunrise, sunset) in local solar hours [0, 24).
         """
-        # Ensure arrays for vectorized operations
-        lat = np.asarray(lat_deg, dtype=float)
+        # # Ensure arrays for vectorized operations
+        # lat = np.asarray(lat_deg, dtype=float)
 
         # Day of year from the simulation clock (UTC)
         N = self.time.timetuple().tm_yday
 
         # Declination (degrees)
-        decl_deg = 23.44 * np.cos(2.0 * np.pi * (N + 10.0) / 365.0)
+        decl_deg = 23.44 * np.sin(2*np.pi*(N - 80) / 365)
         decl_rad = np.radians(decl_deg)
-        lat_rad  = np.radians(lat)
+        lat_rad  = np.radians(lat_deg)
 
         # Hour angle at sunrise/sunset
         cosH = -np.tan(lat_rad) * np.tan(decl_rad)
@@ -291,49 +291,59 @@ class HarmfulAlgalBloom(OceanDrift):
 
     def _target_depth_diel(self, z):
         """
-        Target depth for diel_band behavior.
+        Target depth for diel_band behavior using bands:
 
-        - Uses self.time (UTC) for the simulation date.
-        - Converts UTC to local solar time via longitude.
-        - Computes sunrise/sunset from latitude and date.
+        - Day: band centered at hab:diel_day_depth
+        - Night: band centered at hab:diel_night_depth
+        - Half-width: hab:band_half_width
+
+        Inside the band: no active swimming.
+        Outside the band: swim toward nearest band edge.
         """
         lat = np.asarray(self.elements.lat, dtype=float)
         lon = np.asarray(self.elements.lon, dtype=float)
 
         # Local solar hour for each particle
-        local_hour = self._local_solar_hour(lon)  # same shape as lon
+        local_hour = self._local_solar_hour(lon)
 
-        # Sunrise/sunset (local solar time) for each particle based on lat + date
+        # Sunrise/sunset (local solar time) based on lat + date
         sunrise, sunset = self._approx_sunrise_sunset(lat)
 
         # Daytime mask
         is_day = (local_hour >= sunrise) & (local_hour < sunset)
 
-        day_z = self.get_config('hab:diel_day_depth')
-        night_z = self.get_config('hab:diel_night_depth')
+        day_center   = self.get_config('hab:diel_day_depth')
+        night_center = self.get_config('hab:diel_night_depth')
+        half_w       = self.get_config('hab:band_half_width')
 
-        # Choose depth per particle
-        target = np.where(is_day, day_z, night_z).astype(z.dtype)
+        # Targets for day and night bands
+        target_day   = self._target_into_band(z, day_center,   half_w)
+        target_night = self._target_into_band(z, night_center, half_w)
 
+        # Choose per-particle target
+        target = np.where(is_day, target_day, target_night).astype(z.dtype)
         return target
 
-    # ---------------------------------------------------------------------
-    # Band behavior and dispatcher as before
-    # ---------------------------------------------------------------------
+    def _target_into_band(self, z, center, half_w):
+        """Return target depth that moves z into [center-half_w, center+half_w].
 
-    def _target_depth_band(self, z):
-        z0 = self.get_config('hab:band_center_depth')
-        half_w = self.get_config('hab:band_half_width')
+        - If z is inside the band: target = z (no active movement).
+        - If z is above band:      target = band_min.
+        - If z is below band:      target = band_max.
+        """
+        band_min = center - half_w
+        band_max = center + half_w
 
-        band_min = z0 - half_w
-        band_max = z0 + half_w
-
-        target = np.where(
+        return np.where(
             (z >= band_min) & (z <= band_max),
-            z0,
+            z,
             np.where(z < band_min, band_min, band_max),
         )
-        return target
+
+    def _target_depth_band(self, z):
+        center = self.get_config('hab:band_center_depth')
+        half_w = self.get_config('hab:band_half_width')
+        return self._target_into_band(z, center, half_w)
 
 
     def _apply_vertical_behavior(self):
