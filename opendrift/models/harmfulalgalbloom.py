@@ -220,10 +220,9 @@ class HarmfulAlgalBloom(OceanDrift):
         }
             )
 
-        # Are these on or off when uncommented?
-        # self._set_config_default('drift:vertical_mixing', True)
-        # self._set_config_default('drift:vertical_mixing_at_surface', True)
-        # self._set_config_default('drift:vertical_advection_at_surface', True)
+        self._set_config_default('drift:vertical_mixing', True)
+        self._set_config_default('drift:vertical_mixing_at_surface', True)
+        self._set_config_default('drift:vertical_advection_at_surface', True)
 
     # ---------------------------------------------------------------------
     # Time helpers: UTC -> local solar hour
